@@ -237,10 +237,7 @@ class AttnBasedRetriever:
         per_token_scores, kv_cache = self.score_per_token_attention_to_query(prompt, query_span, None, 0)
 
         # use kv_cache from first query to speed up forward() for the calibration query.
-        for i in range(len(kv_cache.key_cache)):
-            kv_cache.key_cache[i] = kv_cache.key_cache[i][:,:,:query_span[0],:]
-            kv_cache.value_cache[i] = kv_cache.value_cache[i][:,:,:query_span[0],:]
-        kv_cache._seen_tokens = query_span[0]
+        self._truncate_cache(kv_cache, query_span[0])
         start_idx = query_span[0]
 
         null_per_token_scores, _ = self.score_per_token_attention_to_query(null_prompt, null_query_span, kv_cache, start_idx)
@@ -312,10 +309,7 @@ class AttnBasedRetriever:
         per_token_scores, kv_cache = self.score_per_token_attention_to_query(prompt, query_span, None, 0)
 
         # use kv_cache from first query to speed up forward() for the calibration query.
-        for i in range(len(kv_cache.key_cache)):
-            kv_cache.key_cache[i] = kv_cache.key_cache[i][:,:,:query_span[0],:]
-            kv_cache.value_cache[i] = kv_cache.value_cache[i][:,:,:query_span[0],:]
-        kv_cache._seen_tokens = query_span[0]
+        self._truncate_cache(kv_cache, query_span[0])
         start_idx = query_span[0]
 
         null_per_token_scores, _ = self.score_per_token_attention_to_query(null_prompt, null_query_span, kv_cache, start_idx)
@@ -369,8 +363,11 @@ class AttnBasedRetriever:
         
         per_token_scores = []
         # loop through all layers and compute attention scores
-        for i in range(self.start_layer, self.end_layer+1):                     
-            attn_weights = self._get_attn_weights(kv_cache.key_cache[i], kv_cache.query_cache[i]).to(self.device).squeeze(0)  ######## TODO: [:,:,:query_span[0]+1] OR [:,:,:query_span[1]+1] OR [:,:,:] ???
+        for i in range(self.start_layer, self.end_layer+1):
+            key_states = kv_cache.key_cache[i]
+            if hasattr(kv_cache, "get_seq_length"):
+                key_states = key_states[:, :, :kv_cache.get_seq_length(i), :]
+            attn_weights = self._get_attn_weights(key_states, kv_cache.query_cache[i]).to(self.device).squeeze(0)  ######## TODO: [:,:,:query_span[0]+1] OR [:,:,:query_span[1]+1] OR [:,:,:] ???
             attn_weights = attn_weights.mean(1) # average over query tokens
             per_token_scores.append(attn_weights.squeeze(0))
 
@@ -381,6 +378,9 @@ class AttnBasedRetriever:
         chunk_size = int(os.environ.get("QRRETRIEVER_PREFILL_CHUNK_SIZE", "1024"))
         if chunk_size <= 0:
             chunk_size = input_ids.shape[-1]
+
+        if hasattr(kv_cache, "reserve"):
+            kv_cache.reserve(kv_cache.get_seq_length() + input_ids.shape[-1])
 
         for chunk_start in range(0, input_ids.shape[-1], chunk_size):
             chunk_end = min(chunk_start + chunk_size, input_ids.shape[-1])
@@ -400,6 +400,15 @@ class AttnBasedRetriever:
 
         kv_cache._query_indices = query_indices
         return kv_cache
+
+    def _truncate_cache(self, kv_cache, length):
+        if hasattr(kv_cache, "truncate"):
+            kv_cache.truncate(length)
+            return
+        for i in range(len(kv_cache.key_cache)):
+            kv_cache.key_cache[i] = kv_cache.key_cache[i][:, :, :length, :]
+            kv_cache.value_cache[i] = kv_cache.value_cache[i][:, :, :length, :]
+        kv_cache._seen_tokens = length
 
     def _get_attn_weights(self, key_states, query_states):
         bsz, num_heads, q_len, head_dim = query_states.size()
