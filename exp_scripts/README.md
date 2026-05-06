@@ -48,6 +48,44 @@ python exp_scripts/detection/detect_qrhead_lme.py
     --config_or_config_path src/qrretriever/configs/Llama-3.1-8B-Instruct_full_head.yaml
 ```
 
+### Qwen2.5-7B-Instruct
+
+Use the Qwen full-head config with either detection script:
+
+```bash
+python exp_scripts/detection/detect_qrhead_beir.py \
+    --input_file data/beir_data/nq_train.json \
+    --output_file DETECTION_RESULT_JSON_FILE \
+    --truncate_by_space 400 \
+    --config_or_config_path src/qrretriever/configs/Qwen2.5-7B-Instruct_full_head.yaml
+```
+
+```bash
+python exp_scripts/detection/detect_qrhead_lme.py \
+    --input_file data/longmemeval_data/single-session-user_s.json \
+    --output_file DETECTION_RESULT_JSON_FILE \
+    --config_or_config_path src/qrretriever/configs/Qwen2.5-7B-Instruct_full_head.yaml
+```
+
+### OLMo-7B-Instruct-hf
+
+Use the native Hugging Face OLMo full-head config with either detection script. For OLMo, use `allenai/OLMo-7B-Instruct-hf` rather than the older remote-code `allenai/OLMo-7B-Instruct` checkpoint.
+
+```bash
+python exp_scripts/detection/detect_qrhead_beir.py \
+    --input_file data/beir_data/nq_train.json \
+    --output_file DETECTION_RESULT_JSON_FILE \
+    --truncate_by_space 400 \
+    --config_or_config_path src/qrretriever/configs/OLMo-7B-Instruct-hf_full_head.yaml
+```
+
+```bash
+python exp_scripts/detection/detect_qrhead_lme.py \
+    --input_file data/longmemeval_data/single-session-user_s.json \
+    --output_file DETECTION_RESULT_JSON_FILE \
+    --config_or_config_path src/qrretriever/configs/OLMo-7B-Instruct-hf_full_head.yaml
+```
+
 # Retrieval Scripts
 
 `retrieval/` directory contains scripts for running retrieval and evaluating results for BEIR, LME and CLIPPER.

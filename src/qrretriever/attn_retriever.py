@@ -5,13 +5,21 @@ import torch
 import math
 from pathlib import Path
 
+from .transformers_compat import disable_optional_torchvision
+
+disable_optional_torchvision()
+
 from .config import load_config
 from .custom_cache import DynamicCacheWithQuery
 from .custom_modeling_llama import LlamaForCausalLM, repeat_kv
 from .custom_modeling_qwen2 import Qwen2ForCausalLM
+from .custom_modeling_olmo import OlmoForCausalLM
 
 PACKAGE_DIR = Path(__file__).parent
 CONFIG_DIR = PACKAGE_DIR / 'configs'
+LLAMA_MODEL_CLASSES = ['llama-3.1-8b-instruct', 'llama-3.1-70b-instruct', 'llama-3.2-3b-instruct', 'llama-3.2-1b-instruct']
+QWEN_MODEL_CLASSES = ['qwen2.5-7b-instruct']
+OLMO_MODEL_CLASSES = ['olmo-7b-instruct-hf']
 
 class SPEC_HEAD_SET:
     """
@@ -39,10 +47,12 @@ class AttnBasedRetriever:
             setattr(self, k, v)
 
         # init model etc
-        if self.model_base_class.lower() in ['llama-3.1-8b-instruct', 'llama-3.1-70b-instruct', 'llama-3.2-3b-instruct', 'llama-3.2-1b-instruct']:
+        if self.model_base_class.lower() in LLAMA_MODEL_CLASSES:
             BaseClass = LlamaForCausalLM
-        elif self.model_base_class.lower() in ['qwen2.5-7b-instruct']:
+        elif self.model_base_class.lower() in QWEN_MODEL_CLASSES:
             BaseClass = Qwen2ForCausalLM
+        elif self.model_base_class.lower() in OLMO_MODEL_CLASSES:
+            BaseClass = OlmoForCausalLM
         else:
             raise ValueError(f"Unsupported model class: {self.model_base_class}")
         
@@ -105,18 +115,23 @@ class AttnBasedRetriever:
         return start_idx, end_idx
     
     def get_prompt(self, query: str, docs: List[Dict]):
-        if self.model_base_class.lower() in ['llama-3.1-8b-instruct', 'llama-3.1-70b-instruct', 'llama-3.2-3b-instruct', 'llama-3.2-1b-instruct']:
+        model_base_class = self.model_base_class.lower()
+
+        if model_base_class in LLAMA_MODEL_CLASSES:
             self.prompt_prefix = '<|start_header_id|>user<|end_header_id|>'
             self.prompt_suffix = '<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
-        elif self.model_base_class.lower() in ['qwen2.5-7b-instruct']:
+        elif model_base_class in QWEN_MODEL_CLASSES:
             self.prompt_prefix = '<|im_start|>user'
             self.prompt_suffix = '<|im_end|>\n<|im_start|>assistant'
+        elif model_base_class in OLMO_MODEL_CLASSES:
+            self.prompt_prefix = ''
+            self.prompt_suffix = ''
         else:
             raise NotImplementedError("Prompt prefix and suffix not defined for the model of {}.".format(self.model_base_class))
         
-        if self.model_base_class.lower() in ['llama-3.1-8b-instruct', 'llama-3.1-70b-instruct', 'llama-3.2-3b-instruct', 'llama-3.2-1b-instruct']:
+        if model_base_class in LLAMA_MODEL_CLASSES:
             self.prompt_separator = ' \n\n'
-        elif self.model_base_class.lower() in ['qwen2.5-7b-instruct']:
+        elif model_base_class in QWEN_MODEL_CLASSES:
             self.prompt_separator = '\n\n'
         else:
             self.prompt_separator = '\n\n'
@@ -124,7 +139,7 @@ class AttnBasedRetriever:
         self.retrieval_instruction = ' Here are some paragraphs:'
         self.retrieval_instruction_late = 'Please find information that are relevant to the following query in the paragraphs above.'
         
-        llm_prompt = self.prompt_prefix + self.retrieval_instruction
+        user_content = self.retrieval_instruction
         for i, doc in enumerate(docs):
 
             paragraph_text = doc['paragraph_text']
@@ -132,11 +147,26 @@ class AttnBasedRetriever:
                 paragraph_text = doc['title'] + '\n' + paragraph_text
 
             doc = f'[{i+1}] {paragraph_text}'
-            llm_prompt += self.prompt_separator + doc
+            user_content += self.prompt_separator + doc
 
-        llm_prompt += self.prompt_separator + self.retrieval_instruction_late + self.prompt_separator + 'Query:'
-        query_prompt = f' {query}' + self.prompt_suffix
-        llm_prompt += query_prompt
+        user_content += self.prompt_separator + self.retrieval_instruction_late + self.prompt_separator + 'Query:'
+        user_content += f' {query}'
+
+        if model_base_class in OLMO_MODEL_CLASSES:
+            if getattr(self.tokenizer, "chat_template", None) is None:
+                raise ValueError("OLMo prompt construction requires a tokenizer chat_template.")
+            llm_prompt = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": user_content}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            if user_content not in llm_prompt:
+                raise ValueError("Could not locate OLMo user content in chat-templated prompt.")
+            prompt_prefix, prompt_suffix = llm_prompt.split(user_content, 1)
+            self.prompt_prefix = prompt_prefix
+            self.prompt_suffix = prompt_suffix
+        else:
+            llm_prompt = self.prompt_prefix + user_content + self.prompt_suffix
         return llm_prompt
     
     def compose_scoring_prompt(self, query: str, docs: List[Dict]) -> Tuple:
@@ -424,6 +454,8 @@ class FullHeadRetriever(AttnBasedRetriever):
                     config = load_config(CONFIG_DIR / 'Llama-3.2-1B-Instruct_full_head.yaml')
                 elif model_base_class.lower() == 'qwen2.5-7b-instruct':
                     config = load_config(CONFIG_DIR / 'Qwen2.5-7B-Instruct_full_head.yaml')
+                elif model_base_class.lower() == 'olmo-7b-instruct-hf':
+                    config = load_config(CONFIG_DIR / 'OLMo-7B-Instruct-hf_full_head.yaml')
                 else:
                     raise NotImplementedError(f"Config inference for model_base_class {model_base_class} is not implemented.")
             elif model_name_or_path is not None:
@@ -438,6 +470,8 @@ class FullHeadRetriever(AttnBasedRetriever):
                     config = load_config(CONFIG_DIR / 'Llama-3.2-1B-Instruct_full_head.yaml')
                 elif 'qwen2.5-7b-instruct' in model_name_or_path.lower():
                     config = load_config(CONFIG_DIR / 'Qwen2.5-7B-Instruct_full_head.yaml')
+                elif 'olmo-7b-instruct' in model_name_or_path.lower():
+                    config = load_config(CONFIG_DIR / 'OLMo-7B-Instruct-hf_full_head.yaml')
                 else:
                     raise NotImplementedError(f"Config inference for model_name_or_path {model_name_or_path} is not implemented.")
             else:

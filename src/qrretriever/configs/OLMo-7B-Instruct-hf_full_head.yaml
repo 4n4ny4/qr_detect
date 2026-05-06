@@ -1,0 +1,5 @@
+# Default configuration
+
+attn_head_set: "full_heads"
+model_base_class: "OLMo-7B-Instruct-hf"
+model_name_or_path: "allenai/OLMo-7B-Instruct-hf"

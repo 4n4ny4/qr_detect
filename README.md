@@ -50,6 +50,7 @@ print(scores)
 * `Llama-3.1-8B-Instruct`
 * `Llama-3.1-70B-Instruct`
 * `Qwen2.5-7B-Instruct`
+* `OLMo-7B-Instruct-hf` for full-head QRHead detection
 
 ## Reproducing Experiments on Long-Context Reasoning and BEIR Re-ranking
 Please refer to the [README](https://github.com/princeton-pli/QRHead/tree/main/exp_scripts) in `exp_scripts` for

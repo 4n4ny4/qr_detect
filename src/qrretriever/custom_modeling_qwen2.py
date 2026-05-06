@@ -28,6 +28,10 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
+from .transformers_compat import disable_optional_torchvision
+
+disable_optional_torchvision()
+
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from .custom_cache import DynamicCacheWithQuery
