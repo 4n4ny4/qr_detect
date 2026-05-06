@@ -64,6 +64,20 @@ _CHECKPOINT_FOR_DOC = "Qwen/Qwen2-7B-beta"
 _CONFIG_FOR_DOC = "Qwen2Config"
 
 
+def _get_qwen2_rope_theta(config: Qwen2Config) -> float:
+    config_dict = config.to_dict() if hasattr(config, "to_dict") else {}
+    rope_theta = getattr(config, "rope_theta", None)
+    if rope_theta is not None:
+        return rope_theta
+    rope_theta = config_dict.get("rope_theta")
+    if rope_theta is not None:
+        return rope_theta
+    model_name = str(config_dict.get("_name_or_path", getattr(config, "_name_or_path", ""))).lower()
+    if "qwen2.5" in model_name:
+        return 1000000.0
+    return config_dict.get("rotary_emb_base", 10000.0)
+
+
 # Copied from transformers.models.llama.modeling_llama._prepare_4d_causal_attention_mask_with_cache_position
 def _prepare_4d_causal_attention_mask_with_cache_position(
     attention_mask: torch.Tensor,
@@ -264,7 +278,7 @@ class Qwen2Attention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
+        self.rope_theta = _get_qwen2_rope_theta(config)
         self.is_causal = True
         self.attention_dropout = config.attention_dropout
 
