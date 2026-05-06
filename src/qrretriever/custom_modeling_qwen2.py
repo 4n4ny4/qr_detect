@@ -78,6 +78,19 @@ def _get_qwen2_rope_theta(config: Qwen2Config) -> float:
     return config_dict.get("rotary_emb_base", 10000.0)
 
 
+def _get_usable_cache_length(past_key_value: Cache, new_seq_length: int, layer_idx: int) -> int:
+    if hasattr(past_key_value, "get_usable_length"):
+        return past_key_value.get_usable_length(new_seq_length, layer_idx)
+    if hasattr(past_key_value, "get_seq_length"):
+        try:
+            return past_key_value.get_seq_length(layer_idx)
+        except TypeError:
+            return past_key_value.get_seq_length()
+    if len(getattr(past_key_value, "key_cache", [])) <= layer_idx:
+        return 0
+    return past_key_value.key_cache[layer_idx].shape[-2]
+
+
 # Copied from transformers.models.llama.modeling_llama._prepare_4d_causal_attention_mask_with_cache_position
 def _prepare_4d_causal_attention_mask_with_cache_position(
     attention_mask: torch.Tensor,
@@ -326,7 +339,7 @@ class Qwen2Attention(nn.Module):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += _get_usable_cache_length(past_key_value, kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
@@ -428,7 +441,7 @@ class Qwen2FlashAttention2(Qwen2Attention):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += _get_usable_cache_length(past_key_value, kv_seq_len, self.layer_idx)
 
         # Because the input can be padded, the absolute sequence length depends on the max position id.
         rotary_seq_len = (
@@ -585,14 +598,24 @@ class Qwen2SdpaAttention(Qwen2Attention):
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += _get_usable_cache_length(past_key_value, kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            if isinstance(past_key_value, DynamicCacheWithQuery):
+                query_states_to_cache = query_states[:, :, past_key_value._query_indices, :]
+                key_states, value_states = past_key_value.update(
+                    query_states_to_cache,
+                    key_states,
+                    value_states,
+                    self.layer_idx,
+                    cache_kwargs,
+                )
+            else:
+                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)

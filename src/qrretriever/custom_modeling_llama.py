@@ -675,7 +675,17 @@ class LlamaSdpaAttention(LlamaAttention):
         if past_key_value is not None:
             # sin and cos are specific to RoPE models; cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            if isinstance(past_key_value, DynamicCacheWithQuery):
+                query_states_to_cache = query_states[:, :, past_key_value._query_indices, :]
+                key_states, value_states = past_key_value.update(
+                    query_states_to_cache,
+                    key_states,
+                    value_states,
+                    self.layer_idx,
+                    cache_kwargs,
+                )
+            else:
+                key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)

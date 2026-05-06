@@ -8,6 +8,12 @@ class DynamicCacheWithQuery(DynamicCache):
     '''
     def __init__(self, query_indices=[]) -> None:
         super().__init__()
+        if not hasattr(self, "_seen_tokens"):
+            self._seen_tokens = 0
+        if not hasattr(self, "key_cache"):
+            self.key_cache = []
+        if not hasattr(self, "value_cache"):
+            self.value_cache = []
         self._query_indices = query_indices # indices for query vectors to save
         self.query_cache = []
     
