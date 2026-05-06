@@ -365,14 +365,7 @@ class AttnBasedRetriever:
             kv_cache._query_indices = query_indices
 
         with torch.no_grad():
-            output = self.llm(
-                input_ids=input_ids,
-                use_cache=True,
-                past_key_values=kv_cache,
-                output_attentions=False,
-                compute_logits=False,
-            )
-        kv_cache = output.past_key_values
+            kv_cache = self._prefill_cache_in_chunks(input_ids, kv_cache, query_indices)
         
         per_token_scores = []
         # loop through all layers and compute attention scores
@@ -383,6 +376,30 @@ class AttnBasedRetriever:
 
         per_token_scores = torch.stack(per_token_scores, dim=0) # (num_layers, num_heads, num_tokens)
         return per_token_scores, kv_cache
+
+    def _prefill_cache_in_chunks(self, input_ids, kv_cache, query_indices):
+        chunk_size = int(os.environ.get("QRRETRIEVER_PREFILL_CHUNK_SIZE", "1024"))
+        if chunk_size <= 0:
+            chunk_size = input_ids.shape[-1]
+
+        for chunk_start in range(0, input_ids.shape[-1], chunk_size):
+            chunk_end = min(chunk_start + chunk_size, input_ids.shape[-1])
+            kv_cache._query_indices = [
+                idx - chunk_start
+                for idx in query_indices
+                if chunk_start <= idx < chunk_end
+            ]
+            output = self.llm(
+                input_ids=input_ids[:, chunk_start:chunk_end],
+                use_cache=True,
+                past_key_values=kv_cache,
+                output_attentions=False,
+                compute_logits=False,
+            )
+            kv_cache = output.past_key_values
+
+        kv_cache._query_indices = query_indices
+        return kv_cache
 
     def _get_attn_weights(self, key_states, query_states):
         bsz, num_heads, q_len, head_dim = query_states.size()

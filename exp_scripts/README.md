@@ -31,6 +31,8 @@ Detection runs use PyTorch SDPA attention by default, so `flash_attn` is not req
 If FlashAttention is installed and compatible with your PyTorch/CUDA stack, you
 can opt in by prefixing any command with
 `QRRETRIEVER_ATTN_IMPLEMENTATION=flash_attention_2`.
+For long prompts on 40GB GPUs, use `QRRETRIEVER_PREFILL_CHUNK_SIZE=512`
+or `1024` to reduce peak memory during cache prefill.
 
 ## Detection Examples
 
