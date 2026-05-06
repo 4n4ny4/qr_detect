@@ -93,6 +93,18 @@ python exp_scripts/detection/detect_qrhead_lme.py \
     --config_or_config_path src/qrretriever/configs/OLMo-7B-Instruct-hf_full_head.yaml
 ```
 
+For OLMo LME on memory-limited GPUs, use evidence-preserving truncation to
+keep `gt_docs`/`is_supporting` paragraphs intact while shortening distractors:
+
+```bash
+python exp_scripts/detection/detect_qrhead_lme.py \
+    --input_file data/longmemeval_data/single-session-user_s.json \
+    --output_file DETECTION_RESULT_JSON_FILE \
+    --truncate_by_space 5 \
+    --evidence_preserving_truncation \
+    --config_or_config_path src/qrretriever/configs/OLMo-7B-Instruct-hf_full_head.yaml
+```
+
 # Retrieval Scripts
 
 `retrieval/` directory contains scripts for running retrieval and evaluating results for BEIR, LME and CLIPPER.

@@ -6,6 +6,36 @@ import numpy as np
 from qrretriever.attn_retriever import FullHeadRetriever
 
 
+def truncate_text_by_space(text, limit):
+    if limit <= 0:
+        return text
+    words = text.split(' ')
+    if len(words) > limit:
+        print('number of words being truncated: ', len(words) - limit, flush=True)
+    return ' '.join(words[:limit])
+
+
+def prepare_docs_for_detection(
+    data,
+    truncate_by_space=0,
+    evidence_preserving_truncation=False,
+    gold_truncate_by_space=0,
+):
+    docs = data["paragraphs"]
+    gt_doc_ids = set(data.get("gt_docs", []))
+
+    for p in docs:
+        paragraph_text = p['paragraph_text'].strip()
+        is_gold_doc = p.get("idx") in gt_doc_ids or p.get("is_supporting") is True
+
+        if evidence_preserving_truncation and is_gold_doc:
+            p['paragraph_text'] = truncate_text_by_space(paragraph_text, gold_truncate_by_space)
+        else:
+            p['paragraph_text'] = truncate_text_by_space(paragraph_text, truncate_by_space)
+
+    return docs
+
+
 def lme_eval(retrieval_results, data_instances):
     """
     retrieval_results: a dict of qid -> {doc_id -> score}, retrieval results from a specific head
@@ -32,7 +62,13 @@ def lme_eval(retrieval_results, data_instances):
     return mean_score_over_gold # QRScore for a specific head
 
 
-def get_doc_scores_per_head(full_head_retriever, data_instances, truncate_by_space=0):
+def get_doc_scores_per_head(
+    full_head_retriever,
+    data_instances,
+    truncate_by_space=0,
+    evidence_preserving_truncation=False,
+    gold_truncate_by_space=0,
+):
     """
     data_instances: a list of dicts, each dict represents an instance
     """
@@ -40,21 +76,12 @@ def get_doc_scores_per_head(full_head_retriever, data_instances, truncate_by_spa
     for i, data in enumerate(tqdm(data_instances)):
 
         query = data["question"]
-        docs = data["paragraphs"]
-        
-        for p in docs:
-
-            paragraph_text = p['paragraph_text'].strip()
-
-            if truncate_by_space > 0:
-                # Truncate each paragraph by space.
-                if len(paragraph_text.split(' ')) > truncate_by_space:
-                    print('number of words being truncated: ', len(paragraph_text.split(' ')) - truncate_by_space, flush=True)
-
-                p['paragraph_text'] = ' '.join(paragraph_text.split(' ')[:truncate_by_space])
-
-            else:
-                p['paragraph_text'] = paragraph_text
+        docs = prepare_docs_for_detection(
+            data,
+            truncate_by_space=truncate_by_space,
+            evidence_preserving_truncation=evidence_preserving_truncation,
+            gold_truncate_by_space=gold_truncate_by_space,
+        )
 
         retrieval_scores = full_head_retriever.score_docs_per_head_for_detection(query, docs) # doc_id -> score tensor with shape (n_layers, n_heads)
         doc_scores_per_head[data['idx']] = retrieval_scores
@@ -110,6 +137,8 @@ if __name__=="__main__":
     parser.add_argument("--output_file", type=str, required=True, help="Path to the output JSON file to save scores for each head.")
 
     parser.add_argument("--truncate_by_space", type=int, default=0, help="Truncate paragraphs by number of words. Default is 0 (no truncation).")
+    parser.add_argument("--evidence_preserving_truncation", action="store_true", help="For LME, apply --truncate_by_space to non-gold docs only and preserve gt_docs/is_supporting docs.")
+    parser.add_argument("--gold_truncate_by_space", type=int, default=0, help="When using --evidence_preserving_truncation, optionally truncate gold docs to this many words. Default is 0 (preserve full gold docs).")
 
     parser.add_argument("--config_or_config_path", type=str, default=None, help="Path to the configuration file or a configuration string. If not provided, defaults will be used.")
     parser.add_argument("--model_name_or_path", type=str, default=None, help="Path to the model directory or model name.")
@@ -126,7 +155,13 @@ if __name__=="__main__":
     with open(args.input_file, "r") as f:
         data_instances = json.load(f)
 
-    doc_scores_per_head = get_doc_scores_per_head(full_head_retriever, data_instances, truncate_by_space=args.truncate_by_space) # qid -> {doc_id -> score tensor with shape (n_layers, n_heads)}
+    doc_scores_per_head = get_doc_scores_per_head(
+        full_head_retriever,
+        data_instances,
+        truncate_by_space=args.truncate_by_space,
+        evidence_preserving_truncation=args.evidence_preserving_truncation,
+        gold_truncate_by_space=args.gold_truncate_by_space,
+    ) # qid -> {doc_id -> score tensor with shape (n_layers, n_heads)}
     head_scores_list = score_heads(doc_scores_per_head, data_instances)
 
     with open(args.output_file, "w") as f:
