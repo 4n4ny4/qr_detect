@@ -1,0 +1,8 @@
+# Default configuration for Mistral-7B-Instruct-v0.3 full-head detection.
+# Used by `exp_scripts/detection/detect_qrhead_lme.py` and
+# `exp_scripts/detection/detect_qrhead_beir.py` to score every (layer, head)
+# of the model on the LME / NQ detection inputs.
+
+attn_head_set: "full_heads"
+model_base_class: "Mistral-7B-Instruct-v0.3"
+model_name_or_path: "mistralai/Mistral-7B-Instruct-v0.3"

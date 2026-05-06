@@ -15,12 +15,14 @@ from .custom_cache import DynamicCacheWithQuery
 from .custom_modeling_llama import LlamaForCausalLM, repeat_kv
 from .custom_modeling_qwen2 import Qwen2ForCausalLM
 from .custom_modeling_olmo import OlmoForCausalLM
+from .custom_modeling_mistral import MistralForCausalLM
 
 PACKAGE_DIR = Path(__file__).parent
 CONFIG_DIR = PACKAGE_DIR / 'configs'
 LLAMA_MODEL_CLASSES = ['llama-3.1-8b-instruct', 'llama-3.1-70b-instruct', 'llama-3.2-3b-instruct', 'llama-3.2-1b-instruct']
 QWEN_MODEL_CLASSES = ['qwen2.5-7b-instruct']
 OLMO_MODEL_CLASSES = ['olmo-7b-instruct-hf']
+MISTRAL_MODEL_CLASSES = ['mistral-7b-instruct-v0.3']
 
 class SPEC_HEAD_SET:
     """
@@ -54,6 +56,8 @@ class AttnBasedRetriever:
             BaseClass = Qwen2ForCausalLM
         elif self.model_base_class.lower() in OLMO_MODEL_CLASSES:
             BaseClass = OlmoForCausalLM
+        elif self.model_base_class.lower() in MISTRAL_MODEL_CLASSES:
+            BaseClass = MistralForCausalLM
         else:
             raise ValueError(f"Unsupported model class: {self.model_base_class}")
         
@@ -128,6 +132,10 @@ class AttnBasedRetriever:
         elif model_base_class in OLMO_MODEL_CLASSES:
             self.prompt_prefix = ''
             self.prompt_suffix = ''
+        elif model_base_class in MISTRAL_MODEL_CLASSES:
+            # Filled in below via apply_chat_template; placeholders here.
+            self.prompt_prefix = ''
+            self.prompt_suffix = ''
         else:
             raise NotImplementedError("Prompt prefix and suffix not defined for the model of {}.".format(self.model_base_class))
         
@@ -154,16 +162,20 @@ class AttnBasedRetriever:
         user_content += self.prompt_separator + self.retrieval_instruction_late + self.prompt_separator + 'Query:'
         user_content += f' {query}'
 
-        if model_base_class in OLMO_MODEL_CLASSES:
+        if model_base_class in OLMO_MODEL_CLASSES or model_base_class in MISTRAL_MODEL_CLASSES:
             if getattr(self.tokenizer, "chat_template", None) is None:
-                raise ValueError("OLMo prompt construction requires a tokenizer chat_template.")
+                raise ValueError(
+                    f"{self.model_base_class} prompt construction requires a tokenizer chat_template."
+                )
             llm_prompt = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": user_content}],
                 tokenize=False,
                 add_generation_prompt=True,
             )
             if user_content not in llm_prompt:
-                raise ValueError("Could not locate OLMo user content in chat-templated prompt.")
+                raise ValueError(
+                    f"Could not locate {self.model_base_class} user content in chat-templated prompt."
+                )
             prompt_prefix, prompt_suffix = llm_prompt.split(user_content, 1)
             self.prompt_prefix = prompt_prefix
             self.prompt_suffix = prompt_suffix
@@ -484,6 +496,8 @@ class FullHeadRetriever(AttnBasedRetriever):
                     config = load_config(CONFIG_DIR / 'Qwen2.5-7B-Instruct_full_head.yaml')
                 elif model_base_class.lower() == 'olmo-7b-instruct-hf':
                     config = load_config(CONFIG_DIR / 'OLMo-7B-Instruct-hf_full_head.yaml')
+                elif model_base_class.lower() == 'mistral-7b-instruct-v0.3':
+                    config = load_config(CONFIG_DIR / 'Mistral-7B-Instruct-v0.3_full_head.yaml')
                 else:
                     raise NotImplementedError(f"Config inference for model_base_class {model_base_class} is not implemented.")
             elif model_name_or_path is not None:
@@ -500,6 +514,8 @@ class FullHeadRetriever(AttnBasedRetriever):
                     config = load_config(CONFIG_DIR / 'Qwen2.5-7B-Instruct_full_head.yaml')
                 elif 'olmo-7b-instruct' in model_name_or_path.lower():
                     config = load_config(CONFIG_DIR / 'OLMo-7B-Instruct-hf_full_head.yaml')
+                elif 'mistral-7b-instruct' in model_name_or_path.lower():
+                    config = load_config(CONFIG_DIR / 'Mistral-7B-Instruct-v0.3_full_head.yaml')
                 else:
                     raise NotImplementedError(f"Config inference for model_name_or_path {model_name_or_path} is not implemented.")
             else:
