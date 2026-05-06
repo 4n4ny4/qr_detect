@@ -21,6 +21,7 @@
 
 # Adapted from transformers v4.44.1
 import math
+import os
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -252,6 +253,15 @@ class Qwen2MLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, hidden_state):
+        chunk_size = int(os.environ.get("QRRETRIEVER_MLP_CHUNK_SIZE", "2048"))
+        if not torch.is_grad_enabled() and chunk_size > 0 and hidden_state.shape[-2] > chunk_size:
+            return torch.cat(
+                [
+                    self.down_proj(self.act_fn(self.gate_proj(chunk)) * self.up_proj(chunk))
+                    for chunk in hidden_state.split(chunk_size, dim=-2)
+                ],
+                dim=-2,
+            )
         return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
 
 

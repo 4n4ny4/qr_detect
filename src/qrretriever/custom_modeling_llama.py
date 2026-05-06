@@ -20,6 +20,7 @@
 
 # Adapted from transformers v4.44.1
 import math
+import os
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -308,6 +309,21 @@ class LlamaMLP(nn.Module):
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
+        chunk_size = int(os.environ.get("QRRETRIEVER_MLP_CHUNK_SIZE", "2048"))
+        if (
+            not torch.is_grad_enabled()
+            and self.config.pretraining_tp == 1
+            and chunk_size > 0
+            and x.shape[-2] > chunk_size
+        ):
+            return torch.cat(
+                [
+                    self.down_proj(self.act_fn(self.gate_proj(chunk)) * self.up_proj(chunk))
+                    for chunk in x.split(chunk_size, dim=-2)
+                ],
+                dim=-2,
+            )
+
         if self.config.pretraining_tp > 1:
             slice = self.intermediate_size // self.config.pretraining_tp
             gate_proj_slices = self.gate_proj.weight.split(slice, dim=0)
