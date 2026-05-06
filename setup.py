@@ -12,7 +12,6 @@ def get_requires():
     return [
         "torch",
         "transformers>=4.44.0",
-        "flash_attn",
         "pyyaml>=5.1",
     ]
 

@@ -27,6 +27,11 @@ Make sure you have the required data files and configuration files in place:
 
 `detection/` directory contains scripts for running QRHead detection using `128 samples of BEIR NQ` and `70 samples of LME single-session-user`.
 
+Detection runs use eager attention by default, so `flash_attn` is not required.
+If FlashAttention is installed and compatible with your PyTorch/CUDA stack, you
+can opt in by prefixing any command with
+`QRRETRIEVER_ATTN_IMPLEMENTATION=flash_attention_2`.
+
 ## Detection Examples
 
 ### BEIR NQ Dataset

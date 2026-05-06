@@ -1,4 +1,5 @@
 import gc
+import os
 from typing import Dict, List, Optional, Tuple, Union
 import transformers
 import torch
@@ -57,10 +58,11 @@ class AttnBasedRetriever:
             raise ValueError(f"Unsupported model class: {self.model_base_class}")
         
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(self.model_name_or_path)
+        self.attn_implementation = os.environ.get("QRRETRIEVER_ATTN_IMPLEMENTATION", "eager")
         self.llm = BaseClass.from_pretrained(
             self.model_name_or_path,
             torch_dtype=torch.float16, 
-            attn_implementation="flash_attention_2",
+            attn_implementation=self.attn_implementation,
             device_map='auto'
         )
         self.llm.config.pad_token_id = self.llm.config.eos_token_id
@@ -367,7 +369,7 @@ class AttnBasedRetriever:
                 input_ids=input_ids,
                 use_cache=True,
                 past_key_values=kv_cache,
-                output_attentions=True,
+                output_attentions=False,
                 compute_logits=False,
             )
         kv_cache = output.past_key_values

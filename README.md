@@ -19,7 +19,11 @@
 Please first install the following packages:
 * `torch`
 * `transformers` (tested with versions `4.44.1` to `4.48.3`)
-* `flash_attn`
+
+`flash_attn` is optional. QRHead detection uses eager attention by default so
+installing the package does not require compiling FlashAttention. To opt into
+FlashAttention after installing a compatible wheel, run commands with
+`QRRETRIEVER_ATTN_IMPLEMENTATION=flash_attention_2`.
 
 Next, install `qrretriever` by running:
 ```bash
