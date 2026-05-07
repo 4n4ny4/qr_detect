@@ -40,6 +40,20 @@ Stage 4: Princeton code + Mistral-7B-Instruct-v0.3 + LME
 
 ## Stage 1: Llama-8B LME (run this first)
 
+### Prereqs on the GPU box
+
+1. **GPU**: H100 (80GB) or A100 80GB recommended. A100 40GB may OOM at LME's ~115K-token contexts. The script warns if VRAM < 40 GB.
+2. **`HF_TOKEN`** with access to [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) (gated model). Request access on the HF page, then `export HF_TOKEN=hf_...`.
+3. **flash_attn** installed. Princeton's `attn_retriever.py` hardcodes `attn_implementation="flash_attention_2"`. Most Lambda images have it pre-installed; if not:
+   ```bash
+   pip install flash-attn --no-build-isolation
+   ```
+   (15 min compile; needs CUDA toolkit). Or grab a pre-built wheel from the [flash-attention releases page](https://github.com/Dao-AILab/flash-attention/releases) matching your `torch + cuda` combo.
+
+The pre-flight checks at the top of `run_princeton_llama_lme.sh` will catch missing `HF_TOKEN`, missing `flash_attn`, missing CUDA, or sub-40GB VRAM with friendly error messages — fix and re-run.
+
+### Run
+
 ```bash
 # On the GPU box. From this validation/ directory.
 bash run_princeton_llama_lme.sh

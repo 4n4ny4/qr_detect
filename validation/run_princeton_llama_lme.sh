@@ -36,6 +36,86 @@ step() {
     echo "============================================"
 }
 
+# --- Step 0: pre-flight checks ---
+step "0/5: Pre-flight checks"
+
+# 0.a Check HF_TOKEN (Llama-3.1-8B-Instruct is gated on HF)
+if [ -z "${HF_TOKEN:-}" ]; then
+    echo "ERROR: HF_TOKEN is not set."
+    echo "Llama-3.1-8B-Instruct is a gated model on Hugging Face. You need an HF"
+    echo "access token with access to meta-llama/Llama-3.1-8B-Instruct."
+    echo ""
+    echo "To fix:"
+    echo "  1. Get a token from https://huggingface.co/settings/tokens"
+    echo "  2. Request access at https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct"
+    echo "  3. Run: export HF_TOKEN=hf_..."
+    echo "  4. Re-run this script."
+    exit 10
+fi
+echo "HF_TOKEN: set (${#HF_TOKEN} chars)"
+
+# 0.b Check Python + torch + transformers + flash_attn imports
+echo ""
+echo "Checking Python environment..."
+python - <<'PY' || PYEXIT=$?
+import sys
+errors = []
+
+try:
+    import torch
+    print(f"  torch        : {torch.__version__} (cuda={torch.cuda.is_available()}, devices={torch.cuda.device_count() if torch.cuda.is_available() else 0})")
+    if not torch.cuda.is_available():
+        errors.append("torch.cuda.is_available() is False -- this script needs a GPU")
+except ImportError as e:
+    errors.append(f"torch import failed: {e}")
+
+try:
+    import transformers
+    print(f"  transformers : {transformers.__version__}")
+except ImportError as e:
+    errors.append(f"transformers import failed: {e}")
+
+try:
+    import flash_attn
+    print(f"  flash_attn   : {flash_attn.__version__}")
+except ImportError as e:
+    errors.append(f"flash_attn import failed: {e}")
+    print("  flash_attn   : MISSING")
+    print("  Princeton's attn_retriever.py hardcodes attn_implementation='flash_attention_2'.")
+    print("  Without flash_attn, model loading will crash. Install with one of:")
+    print("    pip install flash-attn --no-build-isolation")
+    print("  (compile takes ~15 min; needs CUDA toolkit + nvcc)")
+    print("  OR pre-built wheel for your CUDA / torch combo from")
+    print("    https://github.com/Dao-AILab/flash-attention/releases")
+
+try:
+    import huggingface_hub
+    print(f"  huggingface_hub: {huggingface_hub.__version__}")
+except ImportError:
+    errors.append("huggingface_hub not installed; needed for huggingface-cli download")
+
+if errors:
+    print("\nERRORS:")
+    for e in errors: print(f"  * {e}")
+    sys.exit(1)
+PY
+if [ "${PYEXIT:-0}" != "0" ]; then
+    echo ""
+    echo "Pre-flight failed; fix the errors above and re-run."
+    exit 11
+fi
+
+# 0.c GPU memory: Llama-8B at 115K context needs ~40+ GB VRAM
+GPU_MEM_GB=$(python -c "import torch; print(int(torch.cuda.get_device_properties(0).total_memory / 1024**3))" 2>/dev/null || echo 0)
+echo "GPU memory   : ${GPU_MEM_GB} GB"
+if [ "$GPU_MEM_GB" -gt 0 ] && [ "$GPU_MEM_GB" -lt 40 ]; then
+    echo "WARNING: GPU has only ${GPU_MEM_GB} GB. Princeton's unmodified detection"
+    echo "  on Llama-8B at LME's ~115K-token contexts likely needs >40 GB."
+    echo "  H100 (80GB) or A100 80GB recommended. A100 40GB may OOM."
+    echo "  Continuing anyway in 5 seconds; Ctrl-C to abort."
+    sleep 5
+fi
+
 # --- Step 1: clone Princeton repo (fresh, untouched) ---
 step "1/5: Clone princeton-pli/QRHead -> $PRINCETON_DIR"
 if [ -d "$PRINCETON_DIR/.git" ]; then
