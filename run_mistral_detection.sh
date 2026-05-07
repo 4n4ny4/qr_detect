@@ -14,13 +14,21 @@
 #   6. Run Mistral detection on LME (using probe-chosen N) and NQ (N=400).
 #   7. Write a README to `results/` recording the run config.
 #
+# LME uses --evidence_preserving_truncation (commit 8d9686e). Gold rounds
+# (gt_docs / is_supporting) are kept full; only distractor rounds are
+# truncated to N words. NQ uses uniform --truncate_by_space 400 (matches
+# Princeton paper / collaborator's Qwen + OLMo runs).
+#
 # Override behaviour with env vars:
-#   SKIP_INSTALL=1                    # skip `pip install -e .`
-#   SKIP_DOWNLOAD=1                   # don't re-download data
-#   SKIP_SMOKE=1                      # skip the 2-example smoke test
-#   FORCE_LME_N=<int>                 # bypass probe; use this N for LME
-#   QRRETRIEVER_ATTN_IMPLEMENTATION   # forwarded to qrretriever (default: sdpa)
-#   QRRETRIEVER_MLP_CHUNK_SIZE        # forwarded to qrretriever (default: 2048)
+#   SKIP_INSTALL=1                       # skip `pip install -e .`
+#   SKIP_DOWNLOAD=1                      # don't re-download data
+#   SKIP_SMOKE=1                         # skip the 2-example smoke test
+#   FORCE_LME_N=<int>                    # bypass probe; use this N for distractor truncation
+#   GOLD_TRUNCATE_BY_SPACE=<int>         # cap on gold rounds (default 0 = preserve fully)
+#   DISABLE_EVIDENCE_PRESERVING=1        # fall back to uniform truncation (NOT recommended)
+#   QRRETRIEVER_ATTN_IMPLEMENTATION      # forwarded to qrretriever (default: sdpa)
+#   QRRETRIEVER_MLP_CHUNK_SIZE           # forwarded to qrretriever (default: 2048)
+#   QRRETRIEVER_PREFILL_CHUNK_SIZE       # forwarded to qrretriever (default: 1024)
 
 set -euo pipefail
 
@@ -130,15 +138,31 @@ fi
 # --- Step 6: detection runs ---
 step "6/6: Mistral detection runs"
 
+GOLD_TRUNCATE="${GOLD_TRUNCATE_BY_SPACE:-0}"
+
 if [ -n "$LME_N" ]; then
-    echo ">>> LME with --truncate_by_space $LME_N"
-    python exp_scripts/detection/detect_qrhead_lme.py \
-        --input_file "$LME_DATA" \
-        --output_file "$LME_OUT" \
-        --truncate_by_space "$LME_N" \
-        --config_or_config_path "$CONFIG"
+    if [ "${DISABLE_EVIDENCE_PRESERVING:-0}" = "1" ]; then
+        echo ">>> LME with UNIFORM --truncate_by_space $LME_N (evidence preservation disabled)"
+        python exp_scripts/detection/detect_qrhead_lme.py \
+            --input_file "$LME_DATA" \
+            --output_file "$LME_OUT" \
+            --truncate_by_space "$LME_N" \
+            --config_or_config_path "$CONFIG"
+        LME_TRUNC_MODE="uniform N=$LME_N"
+    else
+        echo ">>> LME with EVIDENCE-PRESERVING truncation: distractor N=$LME_N, gold cap=$GOLD_TRUNCATE (0=preserve full)"
+        python exp_scripts/detection/detect_qrhead_lme.py \
+            --input_file "$LME_DATA" \
+            --output_file "$LME_OUT" \
+            --truncate_by_space "$LME_N" \
+            --evidence_preserving_truncation \
+            --gold_truncate_by_space "$GOLD_TRUNCATE" \
+            --config_or_config_path "$CONFIG"
+        LME_TRUNC_MODE="evidence-preserving (distractor N=$LME_N, gold cap=$GOLD_TRUNCATE)"
+    fi
 else
     echo ">>> Skipping Mistral-LME per probe decision."
+    LME_TRUNC_MODE="N/A (skipped)"
 fi
 
 echo ""
@@ -184,8 +208,8 @@ $( [ -n "$LME_N" ] && echo "- \`mistral_lme.json\` - QRScore ranking on LongMemE
 | QRRETRIEVER_MLP_CHUNK_SIZE | $MLP_CHUNK |
 | LME data | \`$LME_DATA\` (sha256 \`$LME_DATA_SHA\`) |
 | NQ data | \`$NQ_DATA\` (sha256 \`$NQ_DATA_SHA\`) |
-| LME truncate_by_space | ${LME_N:-N/A (skipped)} |
-| NQ truncate_by_space | 400 |
+| LME truncation mode | $LME_TRUNC_MODE |
+| NQ truncate_by_space | 400 (uniform; matches paper / collaborator) |
 | NQ shuffle seed | 42 (set in \`detect_qrhead_beir.py\`) |
 | LME instances run | $( [ -n "$LME_N" ] && echo 70 || echo 0 ) |
 | NQ instances run | 128 |
@@ -203,10 +227,13 @@ Override the probe by setting \`FORCE_LME_N=<int>\`. Skip steps with
 ## Cross-model coordination
 
 Qwen and OLMo runs are produced separately by a collaborator. For
-strict cross-model comparability on LME, share \`probe_report.txt\` with
-them and ask whether they will use the same \`--truncate_by_space\`.
-NQ runs are comparable across models because all use \`--truncate_by_space 400\`
-and \`detect_qrhead_beir.py\`'s \`random.seed(42)\` shuffle is deterministic.
+strict LME cross-model comparability, share \`probe_report.txt\` with
+them and ask whether they will use the same \`--truncate_by_space\` and
+\`--evidence_preserving_truncation\` settings. The OLMo run already used
+\`--truncate_by_space 5 --evidence_preserving_truncation\`; Mistral can
+use a much larger N because of its 32K window. NQ runs are comparable
+across models because all use \`--truncate_by_space 400\` and
+\`detect_qrhead_beir.py\`'s \`random.seed(42)\` shuffle is deterministic.
 EOF
 
 echo ""

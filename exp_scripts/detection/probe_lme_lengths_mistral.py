@@ -1,27 +1,29 @@
 """
 Probe: pick `--truncate_by_space N` for Mistral-7B-Instruct-v0.3 on
-LongMemEval `single-session-user_s.json`.
+LongMemEval `single-session-user_s.json`, using the evidence-preserving
+truncation introduced for OLMo (commit 8d9686e).
 
-Mistral has a 32K positional-encoding window; LME instances are roughly
-50K-120K tokens at full length (Llama-3.1-8B sees them at 128K). We use
-`--truncate_by_space N` to chop each paragraph (dialogue round) to its first
-N words. The decision rule (see plan):
+Background. Mistral has a 32K positional-encoding window; LME instances
+are roughly 50K-120K tokens at full length (Llama-3.1-8B sees them at
+128K). The collaborator's `--evidence_preserving_truncation` flag on
+`detect_qrhead_lme.py` truncates ONLY non-gold paragraphs to
+`--truncate_by_space N`, keeping gold rounds full (or capped via
+`--gold_truncate_by_space`, default 0 = preserve fully). Because gold
+rounds are preserved by construction, the answer-bearing text is never
+chopped, so the QRScore signal stays clean.
 
-    Smallest N in [50, 100, 200, 300, 400] satisfying BOTH:
-      (i)  fit32k(N) >= 60     # >= 60 of 70 instances fit Mistral's 32K window
-      (ii) gold_intact(N) >= 0.90   # >= 90% of gold rounds fit untruncated
-                                    # (so answer-bearing text isn't chopped)
+Decision rule (simplified vs. uniform truncation):
+
+    Smallest N in [5, 25, 50, 100, 200, 400] such that
+      fit32k_ev(N) >= 60   # >= 60 of 70 instances fit Mistral's 32K
+                           # window when only non-gold paragraphs are
+                           # truncated to N words.
     If no N works -> SKIP_MISTRAL_LME.
 
-This script is CPU-only and does not load model weights; it only loads the
-Mistral tokenizer (fast, downloaded once) to compute realistic token counts
-that match what the detection script will see.
+For comparison, the script also reports the OLD uniform-truncation
+fit32k at each N (no evidence preservation, all paragraphs truncated).
 
-Outputs:
-  - Prints a token-length table and gold-round word-count distribution.
-  - Prints a single decision line: `chosen_N=...` or `SKIP_MISTRAL_LME`.
-  - Writes the same content to results/probe_report.txt for citation in
-    results/README.md.
+CPU-only; loads only the Mistral tokenizer (no model weights).
 
 Usage (from repo root):
   python exp_scripts/detection/probe_lme_lengths_mistral.py \\
@@ -31,21 +33,18 @@ Usage (from repo root):
 
 import argparse
 import json
-import os
-import sys
 from pathlib import Path
 
 from transformers import AutoTokenizer
 
-# --- Decision-rule constants. Mirror Step 6 of the plan. ---
-N_CANDIDATES = [50, 100, 200, 300, 400]   # smallest first; rule picks smallest passing
+# --- Decision-rule constants. Mirror plan Step 6 (evidence-preserving variant). ---
+N_CANDIDATES = [5, 25, 50, 100, 200, 400]   # smallest first; rule picks smallest passing
 CONTEXT_WINDOW = 32_000   # Mistral-7B-Instruct-v0.3 max position embeddings
 FIT_THRESHOLD = 60        # >= 60 of 70 LME instances must fit
-GOLD_THRESHOLD = 0.90     # >= 90% of gold rounds must fit untruncated
 
-# The detection-script prompt template. Mirrors `attn_retriever.get_prompt`
-# for OLMo / Mistral (chat-template path) so the token counts here match
-# what `detect_qrhead_lme.py` will actually feed Mistral.
+# Detection-script prompt template. Mirrors `attn_retriever.get_prompt` for
+# OLMo / Mistral (chat-template path) so the token counts here match what
+# `detect_qrhead_lme.py` will actually feed Mistral at run time.
 RETRIEVAL_INSTRUCTION = " Here are some paragraphs:"
 RETRIEVAL_INSTRUCTION_LATE = (
     "Please find information that are relevant to the following query "
@@ -54,22 +53,30 @@ RETRIEVAL_INSTRUCTION_LATE = (
 PROMPT_SEPARATOR = "\n\n"
 
 
-def render_user_content(instance, N=None):
+def render_user_content(instance, distractor_N=None, gold_N=None):
     """Reproduce the user-content body that `attn_retriever.get_prompt` builds.
 
-    If N is not None, each paragraph_text is truncated to its first N
-    whitespace-separated tokens before being inserted (matches what
-    `--truncate_by_space N` does inside the detection scripts).
+    distractor_N: word cap on non-gold paragraphs (None = no truncation)
+    gold_N: word cap on gold paragraphs (None or 0 = preserve fully)
     """
+    gold_idx = set(instance.get("gt_docs", []))
     body = RETRIEVAL_INSTRUCTION
     for i, p in enumerate(instance["paragraphs"]):
         text = p["paragraph_text"].strip()
         if p.get("title"):
             text = p["title"] + "\n" + text
-        if N is not None and N > 0:
+
+        is_gold = (p.get("idx") in gold_idx) or (p.get("is_supporting") is True)
+        if is_gold:
+            cap = gold_N
+        else:
+            cap = distractor_N
+
+        if cap is not None and cap > 0:
             words = text.split()
-            if len(words) > N:
-                text = " ".join(words[:N])
+            if len(words) > cap:
+                text = " ".join(words[:cap])
+
         body += PROMPT_SEPARATOR + f"[{i + 1}] {text}"
     body += PROMPT_SEPARATOR + RETRIEVAL_INSTRUCTION_LATE + PROMPT_SEPARATOR + "Query:"
     body += " " + instance["question"]
@@ -84,45 +91,23 @@ def render_chat_prompt(tokenizer, user_content):
     )
 
 
-def collect_gold_word_counts(data):
-    """List of `len(paragraph_text.split())` for every gold round across all
-    instances with non-empty `gt_docs`. Excludes abstention examples."""
-    word_counts = []
-    n_abstention = 0
-    n_with_gold = 0
-    for d in data:
-        gold = set(d.get("gt_docs", []))
-        if not gold:
-            n_abstention += 1
-            continue
-        n_with_gold += 1
-        for p in d["paragraphs"]:
-            if p["idx"] in gold:
-                word_counts.append(len(p["paragraph_text"].split()))
-    word_counts.sort()
-    return word_counts, n_abstention, n_with_gold
-
-
-def fit32k_at(tokenizer, data, N):
-    """Count instances whose tokenized prompt <= CONTEXT_WINDOW after
-    truncating each paragraph to first N words."""
-    fit = 0
+def measure_lengths(tokenizer, data, distractor_N, gold_N):
+    """Return (fit_count, sorted_lengths) for a given distractor/gold cap pair."""
     lengths = []
     for d in data:
-        body = render_user_content(d, N=N)
+        body = render_user_content(d, distractor_N=distractor_N, gold_N=gold_N)
         prompt = render_chat_prompt(tokenizer, body)
-        n_tok = len(tokenizer.encode(prompt))
-        lengths.append(n_tok)
-        if n_tok <= CONTEXT_WINDOW:
-            fit += 1
+        lengths.append(len(tokenizer.encode(prompt)))
     lengths.sort()
+    fit = sum(1 for l in lengths if l <= CONTEXT_WINDOW)
     return fit, lengths
 
 
-def gold_intact_at(gold_word_counts, N):
-    if not gold_word_counts:
-        return 0.0
-    return sum(1 for c in gold_word_counts if c <= N) / len(gold_word_counts)
+def _q(sorted_lengths, q):
+    if not sorted_lengths:
+        return 0
+    idx = max(0, min(len(sorted_lengths) - 1, int(q * len(sorted_lengths))))
+    return sorted_lengths[idx]
 
 
 def main():
@@ -131,19 +116,16 @@ def main():
         "--input_file",
         type=str,
         default="data/longmemeval_data/single-session-user_s.json",
-        help="LME single-session-user detection JSON (70 instances).",
     )
     parser.add_argument(
         "--tokenizer",
         type=str,
         default="mistralai/Mistral-7B-Instruct-v0.3",
-        help="HF tokenizer id. Loads tokenizer only; no model weights.",
     )
     parser.add_argument(
         "--output_report",
         type=str,
         default="results/probe_report.txt",
-        help="Where to write the textual probe report.",
     )
     args = parser.parse_args()
 
@@ -155,91 +137,93 @@ def main():
         data = json.load(f)
     print(f"  -> {len(data)} instances", flush=True)
 
-    # --- Token-length distribution at each N ---
-    table_lines = []
-    table_lines.append(
-        f"\nToken-length distribution (Mistral tokenizer, chat template, CONTEXT_WINDOW={CONTEXT_WINDOW}):"
-    )
-    table_lines.append(f"{'N':<8}| {'min':<7} {'median':<8} {'max':<7} {'fit32k/' + str(len(data))}")
-    table_lines.append("-" * 50)
+    n_with_gold = sum(1 for d in data if d.get("gt_docs"))
+    n_abstention = len(data) - n_with_gold
 
-    fit32k_by_N = {}
-    for N in [None] + N_CANDIDATES:
-        fit, lengths = fit32k_at(tokenizer, data, N)
-        if N is None:
-            fit32k_by_N[None] = fit
-            label = "full"
-        else:
-            fit32k_by_N[N] = fit
-            label = f"N={N}"
-        median = lengths[len(lengths) // 2]
-        table_lines.append(
-            f"{label:<8}| {min(lengths):<7} {median:<8} {max(lengths):<7} {fit}/{len(data)}"
+    lines = []
+    lines.append(
+        f"Probe (tokenizer={args.tokenizer}, input={args.input_file}, "
+        f"CONTEXT_WINDOW={CONTEXT_WINDOW})"
+    )
+    lines.append(
+        f"Total instances: {len(data)}  with-gold: {n_with_gold}  "
+        f"abstention (empty gt_docs): {n_abstention}"
+    )
+
+    # --- Baseline: full prompt (no truncation) ---
+    full_fit, full_lens = measure_lengths(tokenizer, data, distractor_N=None, gold_N=None)
+    lines.append("")
+    lines.append(
+        f"Full prompt (no truncation): "
+        f"min={min(full_lens)} median={_q(full_lens, 0.5)} max={max(full_lens)} "
+        f"fit32k={full_fit}/{len(data)}"
+    )
+
+    # --- Evidence-preserving truncation (RECOMMENDED): gold full, distractors -> N ---
+    lines.append("")
+    lines.append("=== Evidence-preserving truncation (gold rounds full, distractors -> N) ===")
+    lines.append(f"{'N':<6}| {'min':<6} {'median':<7} {'max':<7} {'fit32k/' + str(len(data))}")
+    lines.append("-" * 50)
+    fit_ev = {}
+    for N in N_CANDIDATES:
+        fit, lens = measure_lengths(tokenizer, data, distractor_N=N, gold_N=None)
+        fit_ev[N] = fit
+        lines.append(
+            f"N={N:<4}| {min(lens):<6} {_q(lens, 0.5):<7} {max(lens):<7} {fit}/{len(data)}"
         )
 
-    # --- Gold-round word-count distribution ---
-    gold_word_counts, n_abstention, n_with_gold = collect_gold_word_counts(data)
-    table_lines.append("")
-    table_lines.append(
-        f"Gold rounds: {len(gold_word_counts)} rounds across {n_with_gold} instances "
-        f"(plus {n_abstention} abstention instances with empty gt_docs, excluded)."
-    )
-    if gold_word_counts:
-        q1 = gold_word_counts[len(gold_word_counts) // 4]
-        q2 = gold_word_counts[len(gold_word_counts) // 2]
-        q3 = gold_word_counts[3 * len(gold_word_counts) // 4]
-        q_max = gold_word_counts[-1]
-        table_lines.append(
-            f"  word-count quantiles: p25={q1} p50={q2} p75={q3} max={q_max}"
+    # --- Comparison: uniform truncation (gold + distractors both -> N) ---
+    lines.append("")
+    lines.append("=== Comparison: UNIFORM truncation (gold AND distractors -> N) ===")
+    lines.append("(NOT recommended: chops gold answer text. Reference only.)")
+    lines.append(f"{'N':<6}| {'min':<6} {'median':<7} {'max':<7} {'fit32k/' + str(len(data))}")
+    lines.append("-" * 50)
+    fit_uniform = {}
+    for N in N_CANDIDATES:
+        fit, lens = measure_lengths(tokenizer, data, distractor_N=N, gold_N=N)
+        fit_uniform[N] = fit
+        lines.append(
+            f"N={N:<4}| {min(lens):<6} {_q(lens, 0.5):<7} {max(lens):<7} {fit}/{len(data)}"
         )
-        table_lines.append("  fit-fully-at-N (gold round word_count <= N):")
-        gold_intact_by_N = {}
-        for N in N_CANDIDATES:
-            pct = 100 * gold_intact_at(gold_word_counts, N)
-            gold_intact_by_N[N] = pct / 100.0
-            table_lines.append(f"    N={N}: {pct:.0f}%")
-    else:
-        gold_intact_by_N = {N: 0.0 for N in N_CANDIDATES}
-        table_lines.append("  (no gold rounds present in data)")
 
-    # --- Decision rule ---
-    table_lines.append("")
-    table_lines.append(
-        f"Decision rule: smallest N s.t. fit32k(N) >= {FIT_THRESHOLD} "
-        f"AND gold_intact(N) >= {GOLD_THRESHOLD:.2f}"
+    # --- Decision rule (evidence-preserving) ---
+    lines.append("")
+    lines.append(
+        f"Decision rule: smallest N in {N_CANDIDATES} s.t. "
+        f"evidence-preserving fit32k(N) >= {FIT_THRESHOLD}"
     )
     chosen_N = None
     for N in N_CANDIDATES:
-        if fit32k_by_N.get(N, 0) >= FIT_THRESHOLD and gold_intact_by_N.get(N, 0.0) >= GOLD_THRESHOLD:
+        if fit_ev.get(N, 0) >= FIT_THRESHOLD:
             chosen_N = N
             break
 
     if chosen_N is None:
-        table_lines.append("DECISION: SKIP_MISTRAL_LME")
-        table_lines.append(
-            "  No N in [50, 100, 200, 300, 400] satisfies both conditions. "
-            "Mistral cannot run on LME without methodologically-questionable truncation. "
+        lines.append("DECISION: SKIP_MISTRAL_LME")
+        lines.append(
+            "  No N in [5, 25, 50, 100, 200, 400] yields >= 60/70 instances "
+            "fitting Mistral's 32K window even with gold rounds preserved. "
+            "Gold rounds plus per-instance prompt overhead exceed the window. "
             "Deliver only results/mistral_nq.json."
         )
     else:
-        table_lines.append(f"DECISION: chosen_N={chosen_N}")
-        table_lines.append(
+        lines.append(f"DECISION: chosen_N={chosen_N}")
+        lines.append(
             f"  Run: python exp_scripts/detection/detect_qrhead_lme.py "
             f"--input_file {args.input_file} "
             f"--output_file results/mistral_lme.json "
             f"--truncate_by_space {chosen_N} "
+            f"--evidence_preserving_truncation "
             f"--config_or_config_path src/qrretriever/configs/"
             f"Mistral-7B-Instruct-v0.3_full_head.yaml"
         )
 
-    # --- Emit ---
-    report = "\n".join(table_lines)
-    print(report, flush=True)
+    report = "\n".join(lines)
+    print("\n" + report, flush=True)
 
     out_path = Path(args.output_report)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
-        f.write(f"Probe report (tokenizer={args.tokenizer}, input={args.input_file})\n")
         f.write(report + "\n")
     print(f"\nWrote probe report -> {out_path}", flush=True)
 
